@@ -1,0 +1,7 @@
+{
+  "name": "TechSupport Pro Request",
+  "description": "A modern, sleek interface for requesting technical assistance with integrated smart diagnosis and location services.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
