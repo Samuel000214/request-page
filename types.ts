@@ -15,11 +15,12 @@ export enum PriorityLevel {
 
 export interface FormData {
   deviceType: DeviceType | null;
+  deviceModel: string;
   description: string;
   priority: PriorityLevel;
   address: string;
   contactInfo: string;
-  preferredSchedule: string;
-  preferredScheduleEnd: string;
+  preferredDate1: string;
+  preferredDate2: string;
   photos: File[];
 }

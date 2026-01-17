@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   ArrowLeft, 
@@ -8,33 +7,42 @@ import {
   AlertCircle, 
   MapPin, 
   Calendar, 
-  Camera, 
   CheckCircle2, 
   Loader2,
   ChevronRight,
-  ChevronDown,
-  Info,
-  HelpCircle,
   X,
-  Clock,
   RotateCcw,
-  AlertTriangle,
-  Zap,
-  MoreHorizontal,
-  Trash2
+  Trash2,
+  ExternalLink,
+  Cpu,
+  UploadCloud,
+  Sparkles,
+  ShieldAlert,
+  Clock,
+  CalendarDays,
+  LocateFixed
 } from 'lucide-react';
 import { DeviceType, PriorityLevel, FormData } from './types';
 import { GoogleGenAI } from "@google/genai";
 
+// Constants
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const MAX_PHOTOS = 10;
+
+// Validation Regex
+const CONTACT_VALIDATION_REGEX = /^(?:(?:\+?1\s*(?:[.-]\s*)?)?(?:\(\s*([2-9]1[02-9]|[2-9][02-8]1|[2-9][02-8][02-9])\s*\)|([2-9]1[02-9]|[2-9][02-8]1|[2-9][02-8][02-9]))\s*(?:[.-]\s*)?)?([2-9]1[02-9]|[2-9][02-9]1|[2-9][02-9]{2})\s*(?:[.-]\s*)?([0-9]{4})(?:\s*(?:x|ext\.?|#)\s*([0-9]+))?$|^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
 // Initial state
 const INITIAL_FORM: FormData = {
   deviceType: null,
+  deviceModel: '',
   description: '',
   priority: PriorityLevel.MEDIUM,
   address: '',
   contactInfo: '',
-  preferredSchedule: '',
-  preferredScheduleEnd: '',
+  preferredDate1: '',
+  preferredDate2: '',
   photos: []
 };
 
@@ -43,60 +51,33 @@ interface UploadProgress {
   status: 'uploading' | 'complete' | 'error';
 }
 
-// Reusable Tooltip Component
-const Tooltip: React.FC<{ text: string; children: React.ReactNode }> = ({ text, children }) => {
-  const [isVisible, setIsVisible] = useState(false);
-
-  return (
-    <div className="relative inline-flex items-center group">
-      {children}
-      <button 
-        type="button"
-        aria-label="More information"
-        className="ml-1.5 cursor-help focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-full" 
-        onMouseEnter={() => setIsVisible(true)} 
-        onMouseLeave={() => setIsVisible(false)}
-        onFocus={() => setIsVisible(true)}
-        onBlur={() => setIsVisible(false)}
-        onClick={() => setIsVisible(!isVisible)}
-      >
-        <HelpCircle className="w-3.5 h-3.5 text-slate-400 hover:text-blue-600 transition-colors" />
-      </button>
-      {isVisible && (
-        <div 
-          role="tooltip"
-          className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-56 p-3 bg-slate-900 text-white text-[11px] rounded-xl shadow-2xl z-[60] animate-in fade-in zoom-in duration-200"
-        >
-          <p className="leading-relaxed font-medium">{text}</p>
-          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-8 border-transparent border-t-slate-900"></div>
-        </div>
-      )}
-    </div>
-  );
-};
-
 const App: React.FC = () => {
   const [formData, setFormData] = useState<FormData>(INITIAL_FORM);
   const [uploads, setUploads] = useState<Record<string, UploadProgress>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLocating, setIsLocating] = useState(false);
+  const [locationStatus, setLocationStatus] = useState<string | null>(null);
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
-  const [smartAnalysis, setSmartAnalysis] = useState<string | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
   const [previewUrls, setPreviewUrls] = useState<{id: string, url: string, loading: boolean}[]>([]);
-  const [isDragging, setIsDragging] = useState(false);
+  const [fileErrors, setFileErrors] = useState<string[]>([]);
+  const [locationSourceUrl, setLocationSourceUrl] = useState<string | null>(null);
 
-  // Validation state
+  // Gemini State
+  const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  // Validation states
   const [contactError, setContactError] = useState<string | null>(null);
 
-  // Refs for scroll tracking
+  // Refs
   const step1Ref = useRef<HTMLElement>(null);
   const step2Ref = useRef<HTMLElement>(null);
   const step3Ref = useRef<HTMLElement>(null);
   const step4Ref = useRef<HTMLElement>(null);
+  const thumbnailScrollRef = useRef<HTMLDivElement>(null);
 
   const scrollToStep = (step: number) => {
     const refs = [step1Ref, step2Ref, step3Ref, step4Ref];
@@ -108,6 +89,22 @@ const App: React.FC = () => {
       });
     }
   };
+
+  // Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeydown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        if (isFormValid && !isSubmitting) {
+          setShowConfirmModal(true);
+        }
+      }
+      if (e.altKey && ['1', '2', '3', '4'].includes(e.key)) {
+        scrollToStep(parseInt(e.key));
+      }
+    };
+    window.addEventListener('keydown', handleKeydown);
+    return () => window.removeEventListener('keydown', handleKeydown);
+  }, [formData, contactError]);
 
   useEffect(() => {
     const observerOptions = {
@@ -152,23 +149,50 @@ const App: React.FC = () => {
     return () => newPreviews.forEach(p => URL.revokeObjectURL(p.url));
   }, [formData.photos.length]);
 
-  const validateContact = (value: string) => {
-    if (!value) {
-      setContactError("Contact info is required");
-      return false;
+  useEffect(() => {
+    if (thumbnailScrollRef.current) {
+      thumbnailScrollRef.current.scrollTo({
+        left: thumbnailScrollRef.current.scrollWidth,
+        behavior: 'smooth'
+      });
     }
-    const phoneRegex = /^[\+]?[(]?[0-9]{3}[)]?[-\s\.]?[0-9]{3}[-\s\.]?[0-9]{4,6}$/;
-    const urlRegex = /^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$/;
-    if (!phoneRegex.test(value) && !urlRegex.test(value)) {
-      setContactError("Enter a valid phone number or social link");
-      return false;
+  }, [previewUrls.length]);
+
+  const handleAiAnalysis = async () => {
+    if (!formData.description) return;
+    setIsAnalyzing(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const prompt = `You are a technical support expert. Analyze the following issue and provide a concise, 2-3 sentence smart diagnosis or troubleshooting step.
+      
+      IMPORTANT: If the user hasn't specified the exact Operating System or specific hardware model details that are crucial for this specific problem, YOU MUST explicitly ask for those details in your response.
+
+      Context:
+      Device Type: ${formData.deviceType}
+      Model/OS provided by user: ${formData.deviceModel || 'Not specified'}
+      Issue Description: ${formData.description}
+      
+      Provide a highly professional and technical analysis. Focus on possible hardware or software root causes.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt
+      });
+      setAiAnalysis(response.text);
+    } catch (err) {
+      console.error("AI Analysis failed", err);
+      setAiAnalysis("Unable to perform AI diagnosis at this time. Please proceed with the description.");
+    } finally {
+      setIsAnalyzing(false);
     }
-    setContactError(null);
-    return true;
   };
 
-  const handleDeviceSelect = (type: DeviceType) => {
-    setFormData(prev => ({ ...prev, deviceType: type }));
+  const validateContact = (value: string) => {
+    if (value.trim() && !CONTACT_VALIDATION_REGEX.test(value)) {
+      setContactError("Please enter a valid phone number or email.");
+    } else {
+      setContactError(null);
+    }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
@@ -177,12 +201,39 @@ const App: React.FC = () => {
     if (name === 'contactInfo') validateContact(value);
   };
 
+  const handleFiles = (files: File[]) => {
+    setFileErrors([]);
+    const validFiles: File[] = [];
+    const currentCount = formData.photos.length;
+
+    if (currentCount >= MAX_PHOTOS) return;
+
+    files.forEach(file => {
+      if (ALLOWED_TYPES.includes(file.type) && file.size <= MAX_FILE_SIZE) {
+        validFiles.push(file);
+      }
+    });
+
+    let filesToAdd = validFiles;
+    const remainingSlots = MAX_PHOTOS - currentCount;
+    if (validFiles.length > remainingSlots) {
+      filesToAdd = validFiles.slice(0, remainingSlots);
+    }
+
+    if (filesToAdd.length > 0) {
+      setFormData(prev => ({ ...prev, photos: [...prev.photos, ...filesToAdd] }));
+      filesToAdd.forEach(file => {
+        const id = file.name + file.size;
+        simulateFileUpload(id);
+      });
+    }
+  };
+
   const simulateFileUpload = (fileId: string) => {
     setUploads(prev => ({ ...prev, [fileId]: { progress: 0, status: 'uploading' } }));
-    
     let currentProgress = 0;
     const interval = setInterval(() => {
-      currentProgress += Math.floor(Math.random() * 20) + 5;
+      currentProgress += Math.floor(Math.random() * 30) + 10;
       if (currentProgress >= 100) {
         currentProgress = 100;
         setUploads(prev => ({ ...prev, [fileId]: { progress: 100, status: 'complete' } }));
@@ -190,23 +241,7 @@ const App: React.FC = () => {
       } else {
         setUploads(prev => ({ ...prev, [fileId]: { ...prev[fileId], progress: currentProgress } }));
       }
-    }, 400);
-  };
-
-  const handleFiles = (files: File[]) => {
-    setFormData(prev => {
-      const existingCount = prev.photos.length;
-      const remainingSpace = 10 - existingCount;
-      const imageFiles = files.filter(file => file.type.startsWith('image/'));
-      const filesToAdd = imageFiles.slice(0, remainingSpace);
-      
-      filesToAdd.forEach(file => {
-        const id = file.name + file.size;
-        simulateFileUpload(id);
-      });
-      
-      return { ...prev, photos: [...prev.photos, ...filesToAdd] };
-    });
+    }, 300);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -215,71 +250,90 @@ const App: React.FC = () => {
   };
 
   const removePhoto = (index: number) => {
-    const fileToRemove = formData.photos[index];
-    const id = fileToRemove.name + fileToRemove.size;
-    setUploads(prev => {
-      const newUploads = { ...prev };
-      delete newUploads[id];
-      return newUploads;
-    });
     setFormData(prev => ({ ...prev, photos: prev.photos.filter((_, i) => i !== index) }));
   };
 
   const handleLocateMe = () => {
     if (navigator.geolocation) {
       setIsLocating(true);
+      setLocationStatus("Accessing GPS...");
+      
       navigator.geolocation.getCurrentPosition(async (position) => {
         const { latitude, longitude } = position.coords;
+        setLocationStatus("Decoding Philippine address...");
+        
         try {
-          const response = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`
-          );
-          const data = await response.json();
-          setFormData(prev => ({ 
-            ...prev, 
-            address: data.display_name || `${latitude.toFixed(5)}, ${longitude.toFixed(5)}` 
-          }));
-        } catch (error) {
-          console.error("Reverse geocoding failed", error);
-          setFormData(prev => ({ 
-            ...prev, 
-            address: `${latitude.toFixed(5)}, ${longitude.toFixed(5)}` 
-          }));
+          const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+          const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: `Identify the exact human-readable street address for the Philippine coordinates ${latitude}, ${longitude}. 
+            You MUST structure the address logically using the following structure in words only:
+            Line 1: House/Building #, Street Name, Subdivision/Village Name.
+            Line 2: Barangay or Zone.
+            Line 3: City or Municipality, Province.
+            Line 4: 4-digit Postal Code.
+            
+            Return ONLY the full structured address as a single, clear block of text. Avoid all coordinate numbers in the output. Use words only.`,
+            config: {
+              tools: [{googleMaps: {}}],
+              toolConfig: {
+                retrievalConfig: {
+                  latLng: {
+                    latitude: latitude,
+                    longitude: longitude
+                  }
+                }
+              }
+            },
+          });
+          const result = response.text?.trim();
+          
+          const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+          if (groundingChunks && groundingChunks.length > 0) {
+            const mapUrl = groundingChunks[0].maps?.uri;
+            if (mapUrl) setLocationSourceUrl(mapUrl);
+          }
+
+          if (result && !result.includes(latitude.toString().slice(0, 4))) {
+            setFormData(prev => ({ ...prev, address: result }));
+            setLocationStatus("Address updated successfully!");
+          } else {
+            setFormData(prev => ({ ...prev, address: "Unknown Philippine Address" }));
+            setLocationStatus("Location found, but address is unclear.");
+          }
+        } catch (err) {
+          console.error("Reverse geocoding failed", err);
+          setFormData(prev => ({ ...prev, address: "My Current Location" }));
+          setLocationStatus("Network error. Using coordinates placeholder.");
         } finally {
           setIsLocating(false);
+          setTimeout(() => setLocationStatus(null), 3000);
         }
       }, (error) => {
-        console.error("Geolocation failed", error);
         setIsLocating(false);
-      });
+        setLocationStatus(error.code === 1 ? "Permission denied." : "GPS unavailable.");
+        setTimeout(() => setLocationStatus(null), 3000);
+      }, { timeout: 10000 });
     }
   };
 
-  const performSmartAnalysis = async () => {
-    if (!formData.description || formData.description.length < 10) return;
-    setIsAnalyzing(true);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: `Analyze: ${formData.description}. Provide a short 1-sentence diagnostic suggestion for a technician.`,
-      });
-      setSmartAnalysis(response.text || null);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsAnalyzing(false);
-    }
+  const performReset = () => {
+    setFormData(INITIAL_FORM);
+    setUploads({});
+    setShowResetModal(false);
+    setContactError(null);
+    setAiAnalysis(null);
+    setLocationSourceUrl(null);
+    scrollToStep(1);
   };
 
   const isFormValid = useMemo(() => {
-    const allUploadsComplete = (Object.values(uploads) as UploadProgress[]).every(u => u.status === 'complete');
     return formData.description.trim().length > 0 && 
            formData.address.trim().length > 0 && 
-           !contactError && formData.contactInfo.trim().length > 0 && 
+           formData.contactInfo.trim().length > 0 && 
            formData.deviceType !== null &&
-           (formData.photos.length === 0 || allUploadsComplete);
-  }, [formData, contactError, uploads]);
+           !contactError;
+  }, [formData, contactError]);
 
   const confirmSubmit = () => {
     setShowConfirmModal(false);
@@ -287,480 +341,321 @@ const App: React.FC = () => {
     setTimeout(() => {
       setIsSubmitting(false);
       setIsSubmitted(true);
-    }, 1500);
-  };
-
-  const performReset = () => {
-    setFormData(INITIAL_FORM);
-    setUploads({});
-    setSmartAnalysis(null);
-    setShowResetModal(false);
-    scrollToStep(1);
+    }, 1200);
   };
 
   if (isSubmitted) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-6 bg-[#F8FAFC]">
-        <div className="max-w-md w-full bg-white rounded-[2rem] shadow-2xl p-10 text-center animate-in zoom-in-95 duration-500">
-          <div className="w-24 h-24 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-8 ring-8 ring-green-50/50">
-            <CheckCircle2 className="w-12 h-12 text-green-500" />
+      <main className="min-h-screen flex items-center justify-center p-6 bg-[#EDF2F7]">
+        <div className="max-w-md w-full bg-white rounded-[2.5rem] shadow-2xl p-10 text-center animate-in zoom-in-95 duration-500" role="alert">
+          <div className="w-20 h-20 bg-green-50 rounded-3xl flex items-center justify-center mx-auto mb-8">
+            <CheckCircle2 className="w-10 h-10 text-green-500" aria-hidden="true" />
           </div>
-          <h2 className="text-3xl font-extrabold text-slate-900 mb-3 tracking-tight">Request Received!</h2>
-          <p className="text-slate-500 mb-10 leading-relaxed font-medium">
-            We've notified our specialist team. You'll receive a confirmation via your provided contact method shortly.
-          </p>
-          <button 
-            onClick={() => { setIsSubmitted(false); setFormData(INITIAL_FORM); setUploads({}); }}
-            className="w-full bg-slate-900 text-white font-bold py-4 rounded-2xl hover:bg-slate-800 transition-all shadow-xl shadow-slate-200"
-          >
-            Go back to Home
-          </button>
+          <h2 className="text-3xl font-black text-slate-900 mb-3 tracking-tight">Success!</h2>
+          <p className="text-slate-500 mb-10 leading-relaxed font-medium">Your request has been submitted. A technician will be assigned shortly.</p>
+          <button onClick={() => { setIsSubmitted(false); setFormData(INITIAL_FORM); }} className="w-full bg-slate-900 text-white font-black py-5 rounded-[1.5rem] hover:bg-slate-800 transition-all shadow-xl focus:ring-4 focus:ring-slate-300 outline-none">Go Home</button>
         </div>
-      </div>
+      </main>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] pb-24 selection:bg-blue-100">
-      {/* Premium Floating Header */}
-      <div className="sticky top-6 z-50 px-4 max-w-4xl mx-auto">
-        <div className="bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_30px_rgb(0,0,0,0.04)] rounded-[2rem] p-4 flex items-center justify-between">
+    <div className="min-h-screen bg-[#F1F5F9] pb-24">
+      {/* Location Status Toast - Non-intrusive floating pill */}
+      {locationStatus && (
+        <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-[3000] animate-in slide-in-from-bottom-4 fade-in duration-300 pointer-events-none">
+          <div className="bg-slate-900/90 backdrop-blur-xl text-white px-6 py-3 rounded-full flex items-center gap-3 shadow-2xl border border-white/10">
+            {isLocating ? (
+              <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+            ) : (
+              <LocateFixed className="w-4 h-4 text-green-400" />
+            )}
+            <span className="text-xs font-black uppercase tracking-widest">{locationStatus}</span>
+          </div>
+        </div>
+      )}
+
+      <nav className="sticky top-6 z-50 px-4 max-w-4xl mx-auto" aria-label="Global Progress">
+        <div className="bg-white/80 backdrop-blur-2xl border border-slate-200/50 shadow-[0_10px_40px_rgba(0,0,0,0.05)] rounded-[2rem] p-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <div className="flex gap-1.5 px-1">
+            <div className="flex gap-1 px-1" role="progressbar" aria-valuenow={currentStep} aria-valuemin={1} aria-valuemax={4}>
               {[1, 2, 3, 4].map((step) => (
-                <div 
-                  key={step}
-                  className={`h-1.5 w-8 rounded-full transition-all duration-500 ${
-                    step === currentStep ? 'bg-blue-600 w-12' : step < currentStep ? 'bg-blue-200' : 'bg-slate-100'
-                  }`}
-                />
+                <div key={step} className={`h-1.5 w-8 rounded-full transition-all duration-500 ${step === currentStep ? 'bg-blue-600 w-12' : step < currentStep ? 'bg-blue-200' : 'bg-slate-100'}`} aria-current={step === currentStep ? 'step' : undefined} />
               ))}
             </div>
-            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">Step {currentStep} of 4</span>
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">Step {currentStep}/4</span>
           </div>
-          
-          {/* Enhanced Reset Shortcut */}
-          <button 
-            type="button"
-            onClick={() => setShowResetModal(true)}
-            className="group relative flex items-center gap-2 px-4 py-2 bg-slate-50 hover:bg-slate-100 rounded-2xl border border-slate-200 transition-all active:scale-95"
-          >
-            <div className="flex items-center gap-2">
-              <RotateCcw className="w-4 h-4 text-slate-400 group-hover:text-blue-600 transition-colors" />
-              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest group-hover:text-slate-900">Reset</span>
-            </div>
-            <div className="absolute -top-1 -right-1 w-3 h-3 bg-blue-500 rounded-full animate-pulse border-2 border-white" />
-          </button>
+          <div className="flex items-center gap-2">
+             <button onClick={() => setShowResetModal(true)} className="flex items-center gap-2 px-4 py-2 bg-slate-50 hover:bg-slate-100 rounded-xl transition-all focus:ring-2 focus:ring-blue-500 outline-none" aria-label="Reset all form fields">
+              <RotateCcw className="w-4 h-4 text-slate-400" />
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Reset</span>
+            </button>
+          </div>
         </div>
-      </div>
+      </nav>
 
       <div className="max-w-4xl mx-auto px-4 mt-12">
         <header className="mb-16">
-          <button className="flex items-center text-slate-400 hover:text-slate-900 transition-colors mb-8 group font-semibold text-sm">
-            <ArrowLeft className="w-4 h-4 mr-2 group-hover:-translate-x-1 transition-transform" />
-            Back to Home
+          <button className="flex items-center text-slate-400 hover:text-slate-900 transition-colors mb-6 font-bold text-sm focus:outline-none focus:underline" aria-label="Go back">
+            <ArrowLeft className="w-4 h-4 mr-2" aria-hidden="true" /> Back
           </button>
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
-            <div className="max-w-xl">
-              <h1 className="text-4xl md:text-6xl font-[900] text-slate-900 tracking-tight leading-[1.1] mb-6">
-                Request a <span className="text-blue-600">Expert</span> Technician
-              </h1>
-              <p className="text-lg text-slate-500 font-medium leading-relaxed">
-                Connect with certified specialists instantly. Fill out the details below to get started.
-              </p>
-            </div>
-            <div className="hidden lg:block">
-              <div className="bg-blue-600 text-white p-6 rounded-[2rem] shadow-xl shadow-blue-200 rotate-3 flex flex-col items-center">
-                <Zap className="w-8 h-8 mb-2 fill-white" />
-                <span className="text-[10px] font-black uppercase tracking-widest">Urgent fixing</span>
-              </div>
-            </div>
-          </div>
+          <h1 className="text-4xl md:text-6xl font-black text-slate-900 tracking-tight leading-[1.1] mb-4">
+            Request an <span className="text-blue-600 underline underline-offset-8 decoration-4 decoration-blue-100">Expert</span>
+          </h1>
+          <p className="text-lg text-slate-500 font-medium">Certified hardware specialists ready to help.</p>
         </header>
 
-        <form onSubmit={(e) => { e.preventDefault(); if(isFormValid) setShowConfirmModal(true); }} className="space-y-8">
-          
-          {/* 01: Device Select */}
-          <section ref={step1Ref} className="bg-white rounded-[2.5rem] p-8 md:p-10 shadow-sm border border-slate-100/50">
+        <form onSubmit={(e) => { e.preventDefault(); if(isFormValid) setShowConfirmModal(true); }} className="space-y-12">
+          {/* Step 01 */}
+          <section ref={step1Ref} className="bg-white rounded-[2.5rem] p-8 md:p-10 shadow-sm border border-slate-200/60">
             <div className="flex items-center gap-4 mb-10">
-              <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-black text-lg">01</div>
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900">Which device needs help?</h2>
-                <p className="text-sm text-slate-400 font-medium mt-1">Select the hardware category below</p>
-              </div>
+              <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-black text-lg" aria-hidden="true">01</div>
+              <h2 className="text-2xl font-black text-slate-900">Device Selection</h2>
             </div>
-            
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-              <DeviceTile 
-                icon={<Monitor className="w-7 h-7" />}
-                label={DeviceType.LAPTOP}
-                active={formData.deviceType === DeviceType.LAPTOP}
-                onClick={() => handleDeviceSelect(DeviceType.LAPTOP)}
-              />
-              <DeviceTile 
-                icon={<Smartphone className="w-7 h-7" />}
-                label={DeviceType.SMARTPHONE}
-                active={formData.deviceType === DeviceType.SMARTPHONE}
-                onClick={() => handleDeviceSelect(DeviceType.SMARTPHONE)}
-              />
-              <DeviceTile 
-                icon={<Globe className="w-7 h-7" />}
-                label={DeviceType.WEBSITE}
-                active={formData.deviceType === DeviceType.WEBSITE}
-                onClick={() => handleDeviceSelect(DeviceType.WEBSITE)}
-              />
-            </div>
-          </section>
-
-          {/* 02: Issue Details */}
-          <section ref={step2Ref} className="bg-white rounded-[2.5rem] p-8 md:p-10 shadow-sm border border-slate-100/50">
-            <div className="flex items-center gap-4 mb-10">
-              <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-black text-lg">02</div>
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900">What's going on?</h2>
-                <p className="text-sm text-slate-400 font-medium mt-1">Describe the problem and set priority</p>
-              </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 mb-8">
+              <DeviceTile icon={<Monitor className="w-6 h-6" />} label={DeviceType.LAPTOP} active={formData.deviceType === DeviceType.LAPTOP} onClick={() => setFormData(p => ({...p, deviceType: DeviceType.LAPTOP}))} />
+              <DeviceTile icon={<Smartphone className="w-6 h-6" />} label={DeviceType.SMARTPHONE} active={formData.deviceType === DeviceType.SMARTPHONE} onClick={() => setFormData(p => ({...p, deviceType: DeviceType.SMARTPHONE}))} />
+              <DeviceTile icon={<Globe className="w-6 h-6" />} label={DeviceType.WEBSITE} active={formData.deviceType === DeviceType.WEBSITE} onClick={() => setFormData(p => ({...p, deviceType: DeviceType.WEBSITE}))} />
             </div>
 
-            <div className="space-y-8">
-              <div className="relative group">
-                <label className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-3 block">Problem Description</label>
-                <textarea
-                  name="description"
-                  value={formData.description}
-                  onChange={handleInputChange}
-                  onBlur={performSmartAnalysis}
-                  placeholder="Tell us exactly what's happening. Include model names or OS versions if you know them."
-                  className="w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-3xl p-6 min-h-[160px] text-slate-700 transition-all font-medium placeholder:text-slate-300 resize-none outline-none"
-                />
-                
-                {isAnalyzing && (
-                  <div className="absolute bottom-4 right-4 flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-full text-[10px] font-bold animate-pulse shadow-lg">
-                    <Loader2 className="w-3 h-3 animate-spin" /> Analyzing Issue
-                  </div>
-                )}
-                
-                {smartAnalysis && !isAnalyzing && (
-                  <div className="mt-4 p-4 rounded-2xl bg-indigo-50 border border-indigo-100 flex gap-3 animate-in fade-in slide-in-from-top-2">
-                    <AlertCircle className="w-5 h-5 text-indigo-500 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-widest text-indigo-400 mb-1">AI Suggestion</p>
-                      <p className="text-sm text-indigo-800 font-semibold italic">"{smartAnalysis}"</p>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div>
-                  <label className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-3 block">Priority Level</label>
-                  <div className="relative">
-                    <select
-                      name="priority"
-                      value={formData.priority}
-                      onChange={handleInputChange}
-                      className="w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-2xl px-5 py-4 text-slate-700 font-bold transition-all appearance-none outline-none cursor-pointer"
-                    >
-                      <option value={PriorityLevel.LOW}>Low - No rush</option>
-                      <option value={PriorityLevel.MEDIUM}>Medium - Normal</option>
-                      <option value={PriorityLevel.HIGH}>High - Faster response</option>
-                      <option value={PriorityLevel.URGENT}>Urgent - Immediate help</option>
-                    </select>
-                    <ChevronDown className="absolute right-5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex items-center gap-2 mb-3">
-                    <label className="text-[11px] font-black uppercase tracking-widest text-slate-400 block">Preferred Times</label>
-                    <Tooltip text="Pick two slots so we can match you faster. Our experts are flexible!">
-                      <span className="cursor-help" />
-                    </Tooltip>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="relative group">
-                      <input
-                        type="datetime-local"
-                        name="preferredSchedule"
-                        value={formData.preferredSchedule}
-                        onChange={handleInputChange}
-                        className="w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-2xl p-4 text-[10px] font-bold text-slate-700 transition-all outline-none"
-                      />
-                      <div className="absolute -top-2 left-3 px-2 bg-white text-[9px] font-black text-blue-600 uppercase rounded-full shadow-sm">Choice 1</div>
-                    </div>
-                    <div className="relative group">
-                      <input
-                        type="datetime-local"
-                        name="preferredScheduleEnd"
-                        value={formData.preferredScheduleEnd}
-                        onChange={handleInputChange}
-                        className="w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-2xl p-4 text-[10px] font-bold text-slate-700 transition-all outline-none"
-                      />
-                      <div className="absolute -top-2 left-3 px-2 bg-white text-[9px] font-black text-slate-400 uppercase rounded-full shadow-sm">Choice 2</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* 03: Location & Contact */}
-          <section ref={step3Ref} className="bg-white rounded-[2.5rem] p-8 md:p-10 shadow-sm border border-slate-100/50">
-            <div className="flex items-center gap-4 mb-10">
-              <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-black text-lg">03</div>
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900">Where and who?</h2>
-                <p className="text-sm text-slate-400 font-medium mt-1">Provide your details for the site visit</p>
-              </div>
-            </div>
-
-            <div className="space-y-8">
-              <div className="bg-amber-50/50 border border-amber-100 p-5 rounded-3xl flex gap-4">
-                <div className="w-10 h-10 bg-amber-100 text-amber-600 rounded-xl flex items-center justify-center shrink-0">
-                  <Info className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-amber-900">Home Visit Required</p>
-                  <p className="text-xs text-amber-700 font-medium mt-1">Our specialist will travel directly to the address provided below. Please ensure someone is present.</p>
-                </div>
-              </div>
-
-              <div className="relative">
-                <label className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-3 block">Service Address</label>
+            {formData.deviceType && (
+              <div className="space-y-4 animate-in slide-in-from-top-4 duration-500">
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1" htmlFor="deviceModel">Model / Version Details</label>
                 <div className="relative group">
-                  <MapPin className="absolute left-6 top-6 w-5 h-5 text-slate-300 group-focus-within:text-blue-500 transition-colors" />
-                  <textarea
-                    name="address"
-                    value={formData.address}
-                    onChange={handleInputChange}
-                    placeholder={isLocating ? "Locating your exact address..." : "Unit number, building name, street, city..."}
-                    disabled={isLocating}
-                    className={`w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-3xl pl-16 pr-6 py-5 min-h-[120px] text-slate-700 transition-all font-medium placeholder:text-slate-300 resize-none outline-none ${isLocating ? 'opacity-50' : ''}`}
+                  <Cpu className="absolute left-6 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors" />
+                  <input 
+                    id="deviceModel"
+                    type="text" 
+                    name="deviceModel" 
+                    value={formData.deviceModel} 
+                    onChange={handleInputChange} 
+                    placeholder="e.g. Dell XPS 15, Windows 11" 
+                    className="w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-[1.25rem] pl-16 pr-12 py-5 font-bold outline-none transition-all shadow-inner" 
+                    aria-label="Device Model and OS"
                   />
-                  <button 
-                    type="button"
-                    onClick={handleLocateMe}
-                    disabled={isLocating}
-                    className="absolute right-4 bottom-4 px-4 py-2 bg-white text-blue-600 text-[10px] font-black uppercase tracking-widest rounded-xl shadow-sm border border-slate-100 hover:bg-slate-50 transition-colors disabled:opacity-50"
-                  >
-                    {isLocating ? (
-                      <div className="flex items-center gap-2">
-                        <Loader2 className="w-3 h-3 animate-spin" /> Finding address
-                      </div>
-                    ) : "Locate Me"}
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-3 block">Contact Method</label>
-                <div className="relative group">
-                  <input
-                    type="text"
-                    name="contactInfo"
-                    value={formData.contactInfo}
-                    onChange={handleInputChange}
-                    placeholder="Phone number or Profile Link (FB/IG/X)"
-                    className={`w-full bg-slate-50 border-2 rounded-2xl px-5 py-4 text-slate-700 font-bold transition-all outline-none ${
-                      contactError ? 'border-rose-400' : 'border-transparent focus:border-blue-500 focus:bg-white'
-                    }`}
-                  />
-                  {contactError && (
-                    <p className="mt-2 text-[10px] font-black text-rose-500 flex items-center gap-1.5 uppercase tracking-wide">
-                      <AlertCircle className="w-3.5 h-3.5" /> {contactError}
-                    </p>
+                  {formData.deviceModel && (
+                    <button type="button" onClick={() => setFormData(p => ({...p, deviceModel: ''}))} className="absolute right-4 top-1/2 -translate-y-1/2 p-2 hover:bg-slate-200 rounded-lg transition-colors text-slate-400" aria-label="Clear model field">
+                      <X className="w-4 h-4" />
+                    </button>
                   )}
                 </div>
               </div>
-            </div>
+            )}
           </section>
 
-          {/* 04: Attachments */}
-          <section ref={step4Ref} className="bg-white rounded-[2.5rem] p-8 md:p-10 shadow-sm border border-slate-100/50">
-            <div className="flex items-center justify-between mb-10">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-black text-lg">04</div>
-                <div>
-                  <h2 className="text-2xl font-bold text-slate-900">Visual proof</h2>
-                  <p className="text-sm text-slate-400 font-medium mt-1">Photos help our specialists diagnose faster</p>
-                </div>
-              </div>
-              <div className="hidden sm:block">
-                <div className="bg-slate-100 px-4 py-1.5 rounded-full text-[10px] font-black text-slate-500 uppercase tracking-widest">
-                  {formData.photos.length}/10 Photos
-                </div>
-              </div>
+          {/* Step 02 */}
+          <section ref={step2Ref} className="bg-white rounded-[2.5rem] p-8 md:p-10 shadow-sm border border-slate-200/60">
+            <div className="flex items-center gap-4 mb-10">
+              <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-black text-lg" aria-hidden="true">02</div>
+              <h2 className="text-2xl font-black text-slate-900">Issue Details</h2>
             </div>
 
             <div className="space-y-8">
-              <label 
-                className={`relative border-3 border-dashed rounded-[2rem] p-10 flex flex-col items-center justify-center transition-all cursor-pointer group ${
-                  formData.photos.length >= 10 ? 'opacity-40 cursor-not-allowed border-slate-100' : 'border-slate-100 hover:border-blue-200 hover:bg-blue-50/20'
-                }`}
-                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleFiles(Array.from(e.dataTransfer.files)); }}
-              >
-                <div className="w-16 h-16 bg-blue-50 text-blue-500 rounded-2xl flex items-center justify-center mb-4 transition-transform group-hover:scale-110">
-                  <Camera className="w-8 h-8" />
+              <div className="space-y-4">
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Priority Level</label>
+                <div className="flex flex-wrap gap-3">
+                  {Object.values(PriorityLevel).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setFormData(prev => ({ ...prev, priority: p }))}
+                      className={`px-6 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all border-2 flex items-center gap-2 ${
+                        formData.priority === p 
+                          ? (p === PriorityLevel.URGENT ? 'bg-rose-500 text-white border-rose-500 shadow-lg shadow-rose-200' : 'bg-slate-900 text-white border-slate-900 shadow-lg shadow-slate-200')
+                          : 'bg-white text-slate-400 border-slate-100 hover:border-slate-300 shadow-sm'
+                      }`}
+                      aria-pressed={formData.priority === p}
+                    >
+                      {p === PriorityLevel.URGENT && <ShieldAlert className="w-4 h-4" />}
+                      {p}
+                    </button>
+                  ))}
                 </div>
-                <p className="text-lg font-bold text-slate-900">Drop or Click to Upload</p>
-                <p className="text-xs text-slate-400 font-medium mt-1">Upload JPG or PNG files up to 10MB</p>
-                <input 
-                  type="file" 
-                  multiple 
-                  accept="image/*" 
-                  className="hidden" 
-                  onChange={handleFileChange} 
-                  disabled={formData.photos.length >= 10}
-                />
-              </label>
+              </div>
 
-              {previewUrls.length > 0 && (
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
-                  {previewUrls.map((p, idx) => {
-                    const uploadInfo = uploads[p.id] || { progress: 0, status: 'uploading' };
-                    return (
-                      <div key={p.id} className="relative group">
-                        <div className="relative aspect-square rounded-[1.5rem] overflow-hidden shadow-xl border-2 border-white ring-1 ring-slate-100 bg-slate-50">
-                          {p.loading ? (
-                            <div className="w-full h-full flex items-center justify-center"><Loader2 className="w-6 h-6 animate-spin text-blue-500" /></div>
-                          ) : (
-                            <img src={p.url} className={`w-full h-full object-cover transition-all ${uploadInfo.status === 'uploading' ? 'blur-[2px] opacity-40 scale-105' : 'group-hover:scale-110'}`} alt="Preview" />
-                          )}
-                          
-                          {/* Overlay for Progress */}
-                          {uploadInfo.status === 'uploading' && (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center p-4">
-                              <span className="text-[12px] font-black text-blue-600 mb-2">{uploadInfo.progress}%</span>
-                              <div className="w-full h-1.5 bg-blue-100 rounded-full overflow-hidden shadow-inner">
-                                <div 
-                                  className="h-full bg-blue-600 transition-all duration-300 ease-out shadow-[0_0_10px_rgba(37,99,235,0.4)]" 
-                                  style={{ width: `${uploadInfo.progress}%` }} 
-                                />
-                              </div>
-                              <span className="text-[8px] font-black uppercase tracking-widest text-blue-400 mt-2">Uploading</span>
-                            </div>
-                          )}
-
-                          {/* Complete Status Indicator */}
-                          {uploadInfo.status === 'complete' && (
-                            <div className="absolute top-2 left-2 p-1.5 bg-green-500 text-white rounded-full shadow-lg scale-90">
-                              <CheckCircle2 className="w-3 h-3" />
-                            </div>
-                          )}
-
-                          {/* Remove Button */}
-                          <button 
-                            type="button" 
-                            onClick={() => removePhoto(idx)}
-                            className="absolute top-2 right-2 p-1.5 bg-white/90 backdrop-blur-sm text-rose-500 rounded-xl shadow-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-rose-50 hover:scale-110"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        </div>
-                        
-                        {/* File Name Caption */}
-                        <div className="mt-2 px-1">
-                          <p className="text-[10px] font-bold text-slate-500 truncate">{formData.photos[idx]?.name}</p>
-                        </div>
-                      </div>
-                    );
-                  })}
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Description</label>
+                  <button type="button" onClick={handleAiAnalysis} disabled={!formData.description || isAnalyzing} className="flex items-center gap-2 text-blue-600 font-black text-[10px] uppercase tracking-widest bg-blue-50 px-4 py-2 rounded-xl hover:bg-blue-100 transition-all disabled:opacity-50 shadow-sm">
+                    {isAnalyzing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />} Smart Diagnosis
+                  </button>
                 </div>
-              )}
+                <div className="relative">
+                  <textarea name="description" value={formData.description} onChange={handleInputChange} placeholder="Describe what's happening..." className="w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-[1.5rem] p-6 min-h-[160px] text-slate-700 font-medium outline-none transition-all resize-none shadow-inner" aria-required="true" />
+                </div>
+                {aiAnalysis && (
+                  <div className="p-6 bg-blue-50/50 border border-blue-100 rounded-[1.5rem] flex items-start gap-4 animate-in slide-in-from-top-2 duration-300">
+                    <Sparkles className="w-5 h-5 text-blue-600 mt-1" />
+                    <div>
+                      <h4 className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">AI Recommendation</h4>
+                      <p className="text-sm text-slate-700 font-medium leading-relaxed">{aiAnalysis}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </section>
 
-          {/* Form Footer Actions */}
-          <div className="flex flex-col md:flex-row items-center gap-6 pt-10">
-            <button 
-              type="button"
-              onClick={() => setShowResetModal(true)}
-              className="w-full md:w-auto px-8 py-5 text-slate-400 font-bold hover:text-slate-900 transition-colors flex items-center justify-center gap-2"
-            >
-              <RotateCcw className="w-4 h-4" /> Reset Form
+          {/* Step 03 */}
+          <section ref={step3Ref} className="bg-white rounded-[2.5rem] p-8 md:p-10 shadow-sm border border-slate-200/60">
+            <div className="flex items-center gap-4 mb-10">
+              <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-black text-lg" aria-hidden="true">03</div>
+              <h2 className="text-2xl font-black text-slate-900">Logistics</h2>
+            </div>
+            <div className="space-y-8">
+              <div className="space-y-4">
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Service Location</label>
+                <div className="relative group">
+                  <MapPin className="absolute left-6 top-6 text-slate-400 group-focus-within:text-blue-500 transition-colors pointer-events-none" />
+                  <textarea name="address" value={formData.address} onChange={handleInputChange} placeholder="Building/House #, Street, Barangay, City, Province, Postal Code..." className="w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-[1.25rem] pl-16 pr-32 py-5 font-semibold text-slate-800 outline-none transition-all shadow-inner leading-relaxed min-h-[120px] resize-none" aria-required="true" />
+                  <div className="absolute right-4 top-5">
+                    <button 
+                      type="button" 
+                      onClick={handleLocateMe} 
+                      disabled={isLocating}
+                      className={`px-4 py-2 bg-white text-[10px] font-black uppercase rounded-xl border border-slate-200 transition-all shadow-sm flex items-center gap-2 ${isLocating ? 'opacity-50' : 'hover:border-blue-500 hover:text-blue-600'}`}
+                    >
+                      {isLocating ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Locate'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Contact Info</label>
+                <input type="text" name="contactInfo" value={formData.contactInfo} onChange={handleInputChange} placeholder="Phone or email..." className="w-full bg-slate-50 border-2 border-transparent focus:border-blue-500 focus:bg-white rounded-[1.25rem] px-6 py-5 font-bold outline-none transition-all shadow-inner" />
+                {contactError && <p className="text-rose-500 text-xs font-bold ml-1">{contactError}</p>}
+              </div>
+
+              {/* Availability Slots */}
+              <div className="space-y-6 pt-6 border-t border-slate-100">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1 flex items-center gap-2">
+                    <CalendarDays className="w-4 h-4 text-blue-500" /> Preferred Visit Time
+                  </label>
+                  <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">Select up to 2 slots</span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className={`relative p-6 rounded-[1.5rem] border-2 transition-all ${formData.preferredDate1 ? 'bg-white border-blue-500 shadow-lg shadow-blue-500/5' : 'bg-slate-50 border-transparent hover:border-slate-200'}`}>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black ${formData.preferredDate1 ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-400'}`}>1</div>
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Primary Slot</span>
+                      </div>
+                      {formData.preferredDate1 && (
+                        <button type="button" onClick={() => setFormData(p => ({...p, preferredDate1: ''}))} className="p-1.5 bg-slate-100 text-slate-400 rounded-lg hover:bg-rose-50 hover:text-rose-500 transition-colors">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <Clock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4 pointer-events-none" />
+                      <input 
+                        type="datetime-local" 
+                        name="preferredDate1" 
+                        value={formData.preferredDate1} 
+                        onChange={handleInputChange} 
+                        className="w-full bg-transparent border-0 pl-10 pr-4 py-3 font-bold text-slate-900 focus:ring-0 cursor-pointer outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className={`relative p-6 rounded-[1.5rem] border-2 transition-all ${formData.preferredDate2 ? 'bg-white border-blue-500 shadow-lg shadow-blue-500/5' : 'bg-slate-50 border-transparent hover:border-slate-200'}`}>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black ${formData.preferredDate2 ? 'bg-blue-400 text-white' : 'bg-slate-200 text-slate-400'}`}>2</div>
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Backup Slot</span>
+                      </div>
+                      {formData.preferredDate2 && (
+                        <button type="button" onClick={() => setFormData(p => ({...p, preferredDate2: ''}))} className="p-1.5 bg-slate-100 text-slate-400 rounded-lg hover:bg-rose-50 hover:text-rose-500 transition-colors">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <Clock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4 pointer-events-none" />
+                      <input 
+                        type="datetime-local" 
+                        name="preferredDate2" 
+                        value={formData.preferredDate2} 
+                        onChange={handleInputChange} 
+                        className="w-full bg-transparent border-0 pl-10 pr-4 py-3 font-bold text-slate-900 focus:ring-0 cursor-pointer outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Step 04 */}
+          <section ref={step4Ref} className="bg-white rounded-[2.5rem] p-8 md:p-10 shadow-sm border border-slate-200/60">
+            <div className="flex items-center justify-between mb-10">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center font-black text-lg" aria-hidden="true">04</div>
+                <h2 className="text-2xl font-black text-slate-900">Visual Proof</h2>
+              </div>
+              <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{formData.photos.length}/10 Photos</div>
+            </div>
+            
+            <div className="grid grid-cols-1 gap-6">
+              <label className="relative aspect-video rounded-[2rem] border-2 border-dashed border-slate-200 bg-slate-50/50 flex flex-col items-center justify-center cursor-pointer hover:bg-white hover:border-blue-300 transition-all shadow-sm">
+                <UploadCloud className="w-8 h-8 text-blue-600 mb-4" />
+                <h3 className="font-black text-slate-900">Drop or Browse</h3>
+                <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileChange} />
+              </label>
+            </div>
+
+            {previewUrls.length > 0 && (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 mt-8">
+                {previewUrls.map((p, idx) => (
+                  <div key={p.id} className="relative group aspect-square rounded-[1.5rem] overflow-hidden border-2 border-white shadow-lg bg-slate-100">
+                    <img src={p.url} className="w-full h-full object-cover" alt="Proof" />
+                    <button type="button" onClick={() => removePhoto(idx)} className="absolute top-2 right-2 w-8 h-8 bg-black/40 backdrop-blur-md text-white rounded-xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <div className="flex flex-col sm:flex-row items-center gap-6 pt-10">
+            <button type="submit" disabled={!isFormValid || isSubmitting} className={`flex-[2] h-20 rounded-[2rem] font-black text-xl flex items-center justify-center gap-3 transition-all shadow-2xl ${!isFormValid ? 'bg-slate-200 text-slate-400' : 'bg-slate-900 text-white hover:bg-black active:scale-95'}`}>
+              {isSubmitting ? <Loader2 className="w-6 h-6 animate-spin" /> : <>Submit Request <ChevronRight className="w-6 h-6" /></>}
             </button>
-            <button 
-              type="submit"
-              disabled={!isFormValid || isSubmitting}
-              className={`w-full md:flex-1 h-20 rounded-[2rem] font-[900] text-lg flex items-center justify-center gap-3 transition-all shadow-2xl ${
-                !isFormValid 
-                ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none' 
-                : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200 active:scale-95'
-              }`}
-            >
-              {isSubmitting ? (
-                <Loader2 className="w-6 h-6 animate-spin" />
-              ) : (
-                <>
-                  Submit Request <ChevronRight className="w-5 h-5" />
-                </>
-              )}
-            </button>
+            <button type="button" onClick={() => setShowResetModal(true)} className="flex-1 h-20 rounded-[2rem] border-2 border-slate-200 bg-white font-black text-slate-400 hover:text-rose-500 hover:bg-rose-50 transition-all">Reset Form</button>
           </div>
-          
-          <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-300">
-            Secure processing by TechSupport Cloud
-          </p>
         </form>
       </div>
 
-      {/* Modern Confirmation Modal */}
+      {/* MODALS */}
       {showConfirmModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[2000] flex items-center justify-center p-6">
           <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setShowConfirmModal(false)} />
-          <div className="bg-white rounded-[2.5rem] p-10 max-w-lg w-full shadow-[0_30px_100px_rgba(0,0,0,0.15)] relative z-10 animate-in zoom-in-95 duration-300">
-            <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-3xl flex items-center justify-center mb-8">
-              <AlertTriangle className="w-8 h-8" />
-            </div>
-            <h3 className="text-3xl font-extrabold text-slate-900 mb-3 tracking-tight">Final check?</h3>
-            <p className="text-slate-500 mb-10 leading-relaxed font-medium">
-              We'll send your request details to our nearby specialists. Please ensure your contact details are active to receive calls.
-            </p>
-            <div className="grid grid-cols-2 gap-4">
-              <button 
-                onClick={() => setShowConfirmModal(false)}
-                className="py-4 bg-slate-50 text-slate-500 font-bold rounded-2xl hover:bg-slate-100 transition-colors"
-              >
-                Go back
-              </button>
-              <button 
-                onClick={confirmSubmit}
-                className="py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-slate-800 transition-all shadow-xl shadow-slate-200"
-              >
-                Confirm & Send
-              </button>
+          <div className="bg-white rounded-[2rem] p-8 max-w-[320px] w-full shadow-2xl relative z-20 text-center animate-in zoom-in-95 duration-300">
+            <CheckCircle2 className="w-12 h-12 text-blue-600 mx-auto mb-6" />
+            <h3 className="text-xl font-black text-slate-900 mb-2">Ready to Submit?</h3>
+            <p className="text-sm text-slate-500 mb-8 font-medium">Please verify your details before sending the request.</p>
+            <div className="flex flex-col gap-3">
+              <button onClick={confirmSubmit} className="w-full py-4 bg-slate-900 text-white font-black rounded-2xl">Confirm Submission</button>
+              <button onClick={() => setShowConfirmModal(false)} className="w-full py-3 text-slate-400 font-bold">Wait, let me check</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Styled Reset Warning Modal */}
       {showResetModal && (
-        <div className="fixed inset-0 z-[101] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" onClick={() => setShowResetModal(false)} />
-          <div className="bg-white rounded-[2.5rem] p-10 max-w-md w-full shadow-[0_30px_100px_rgba(0,0,0,0.2)] relative z-10 animate-in zoom-in-95 duration-300 text-center">
-            <div className="w-20 h-20 bg-rose-50 text-rose-500 rounded-[2rem] flex items-center justify-center mb-8 mx-auto ring-8 ring-rose-50/50">
-              <Trash2 className="w-10 h-10" />
-            </div>
-            <h3 className="text-3xl font-[900] text-slate-900 mb-3 tracking-tight">Start Over?</h3>
-            <p className="text-slate-500 mb-10 leading-relaxed font-medium">
-              This will clear all your progress, descriptions, and uploaded photos. This action cannot be undone.
-            </p>
+        <div className="fixed inset-0 z-[2001] flex items-center justify-center p-6">
+          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setShowResetModal(false)} />
+          <div className="bg-white rounded-[2rem] p-8 max-w-[320px] w-full shadow-2xl relative z-20 text-center animate-in zoom-in-95 duration-300">
+            <Trash2 className="w-12 h-12 text-rose-500 mx-auto mb-6" />
+            <h3 className="text-xl font-black text-slate-900 mb-2">Reset Form?</h3>
+            <p className="text-sm text-slate-500 mb-8 font-medium">This will clear all entries permanently.</p>
             <div className="flex flex-col gap-3">
-              <button 
-                onClick={performReset}
-                className="w-full py-5 bg-rose-500 text-white font-black uppercase tracking-widest rounded-2xl hover:bg-rose-600 transition-all shadow-xl shadow-rose-200 active:scale-95"
-              >
-                Yes, Clear Everything
-              </button>
-              <button 
-                onClick={() => setShowResetModal(false)}
-                className="w-full py-5 text-slate-400 font-bold hover:text-slate-900 transition-colors"
-              >
-                Cancel
-              </button>
+              <button onClick={performReset} className="w-full py-4 bg-rose-600 text-white font-black rounded-2xl">Reset Everything</button>
+              <button onClick={() => setShowResetModal(false)} className="w-full py-3 text-slate-400 font-bold">Cancel</button>
             </div>
           </div>
         </div>
@@ -769,37 +664,13 @@ const App: React.FC = () => {
   );
 };
 
-interface DeviceTileProps {
-  icon: React.ReactNode;
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}
-
-const DeviceTile: React.FC<DeviceTileProps> = ({ icon, label, active, onClick }) => (
-  <button 
-    type="button"
-    onClick={onClick}
-    className={`relative p-8 rounded-[2rem] border-2 transition-all flex flex-col items-start text-left h-full ${
-      active 
-      ? 'border-blue-600 bg-blue-50/50 shadow-xl shadow-blue-600/5' 
-      : 'border-slate-50 bg-slate-50 hover:bg-slate-100 hover:border-slate-200'
-    }`}
-  >
-    <div className={`w-14 h-14 rounded-2xl flex items-center justify-center mb-8 transition-all ${
-      active ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'bg-white text-slate-400 group-hover:text-slate-600'
-    }`}>
-      {icon}
-    </div>
+const DeviceTile: React.FC<{ icon: React.ReactNode; label: string; active: boolean; onClick: () => void; }> = ({ icon, label, active, onClick }) => (
+  <button type="button" onClick={onClick} className={`p-8 rounded-[2rem] border-2 text-left transition-all h-full flex flex-col items-start ${active ? 'border-blue-600 bg-blue-50/50 shadow-xl' : 'border-slate-100 bg-slate-50 hover:bg-white focus:border-blue-300'}`} aria-pressed={active}>
+    <div className={`w-12 h-12 rounded-xl flex items-center justify-center mb-8 transition-all ${active ? 'bg-blue-600 text-white scale-110' : 'bg-white text-slate-400'}`}>{icon}</div>
     <div className="mt-auto">
       <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${active ? 'text-blue-600' : 'text-slate-400'}`}>Category</p>
-      <h3 className={`text-xl font-extrabold tracking-tight ${active ? 'text-slate-900' : 'text-slate-700'}`}>{label}</h3>
+      <h3 className={`text-xl font-black transition-colors ${active ? 'text-slate-900' : 'text-slate-600'}`}>{label}</h3>
     </div>
-    {active && (
-      <div className="absolute top-6 right-6 w-5 h-5 bg-blue-600 rounded-full flex items-center justify-center animate-in zoom-in-50">
-        <CheckCircle2 className="w-3 h-3 text-white" />
-      </div>
-    )}
   </button>
 );
 
